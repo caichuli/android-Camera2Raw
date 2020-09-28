@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-package com.example.android.camera2raw;
+package com.example.android.camera2raw.fragment;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
@@ -24,12 +25,19 @@ import android.app.DialogFragment;
 import android.app.Fragment;
 import android.content.Context;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.Point;
 import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
 import android.hardware.SensorManager;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -47,6 +55,7 @@ import android.media.Image;
 import android.media.ImageReader;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
+import android.net.wifi.aware.Characteristics;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Environment;
@@ -66,7 +75,16 @@ import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
+import android.widget.LinearLayout;
+import android.widget.Spinner;
 import android.widget.Toast;
+
+import com.example.android.camera2raw.R;
+import com.example.android.camera2raw.adapter.OutPutAdapter;
+import com.example.android.camera2raw.customView.AutoFitTextureView;
+import com.example.android.camera2raw.customView.CicleImageView;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -125,6 +143,39 @@ public class Camera2RawFragment extends Fragment
      * Conversion from screen rotation to JPEG orientation.
      */
     private static final SparseIntArray ORIENTATIONS = new SparseIntArray();
+    LinearLayout cameraGrid;
+    CameraManager manager;
+    List<Size> outputSizes;// 摄像头尺寸
+    List<String> cameraList;  //相机id
+    static OutPutAdapter adapter;
+    Spinner spinner,spinner_cameraId;
+    Size previewSize;
+    Size screenSize;
+    int sizePosition;//当前预览位置
+    static CicleImageView photo_view;
+
+    private static int MESSAGE_DATA_CHANGE = 0x123;
+    private static int MESSAGE_IMAGE_SAVED = 0x124;
+    private static Bitmap thumb_bitmap;
+
+
+    boolean first_cameraID = true;
+    boolean first_cameraResolution = true;
+
+
+    private static Handler dataHandler = new Handler(){
+        @Override
+        public void handleMessage(Message msg) {
+            super.handleMessage(msg);
+            if(msg.what == MESSAGE_DATA_CHANGE) {
+                adapter.notifyDataSetChanged();
+            }
+            else if(msg.what == MESSAGE_IMAGE_SAVED){
+                photo_view.setImageBitmap(thumb_bitmap);
+            }
+
+        }
+    };
 
     static {
         ORIENTATIONS.append(Surface.ROTATION_0, 0);
@@ -214,6 +265,7 @@ public class Camera2RawFragment extends Fragment
 
         @Override
         public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {
+            Log.e("TAG","Size changed 回调执行"+width+" "+height+" screenSize:"+screenSize);
             configureTransform(width, height);
         }
 
@@ -345,6 +397,7 @@ public class Camera2RawFragment extends Fragment
      * taking too long.
      */
     private long mCaptureTimer;
+    private static File thumb_file; //缩略图文件
 
     //**********************************************************************************************
 
@@ -352,6 +405,18 @@ public class Camera2RawFragment extends Fragment
      * {@link CameraDevice.StateCallback} is called when the currently active {@link CameraDevice}
      * changes its state.
      */
+    /*
+    合并两个列表
+     */
+    private <T> List<T> mergeList(List<T> list1,List<T> list2){
+        List<T> list = new ArrayList<>();
+        for(T t:list1){
+            if(list2.contains(t)){
+                list.add(t);
+            }
+        }
+        return list;
+    }
     private final CameraDevice.StateCallback mStateCallback = new CameraDevice.StateCallback() {
 
         @Override
@@ -362,7 +427,18 @@ public class Camera2RawFragment extends Fragment
                 mState = STATE_OPENED;
                 mCameraOpenCloseLock.release();
                 mCameraDevice = cameraDevice;
+                //获取当前启动摄像头的fen
+                List<Size> jpegSizes = getCameraOutputSizes(mCameraId,ImageFormat.JPEG);
+                List<Size> textureSizes = getCameraOutputSizes(mCameraId,SurfaceTexture.class);
 
+                outputSizes = mergeList(jpegSizes,textureSizes);
+
+                //Log.e("TAG","合并：jpeg:"+jpegSizes.size()+" texture:"+textureSizes.size()+" merge："+outputSizes.size());
+
+                /*outputSizes = getCameraOutputSizes(mCameraId,ImageFormat.JPEG);*/
+
+                adapter.setSizeList(outputSizes);
+                dataHandler.sendEmptyMessage(0x123);
                 // Start the preview session if the TextureView has been set up already.
                 if (mPreviewSize != null && mTextureView.isAvailable()) {
                     createCameraPreviewSessionLocked();
@@ -603,13 +679,130 @@ public class Camera2RawFragment extends Fragment
     @Override
     public View onCreateView(LayoutInflater inflater, ViewGroup container,
                              Bundle savedInstanceState) {
-        return inflater.inflate(R.layout.fragment_camera2_basic, container, false);
+
+        View v = inflater.inflate(R.layout.fragment_camera2_basic, container, false);
+        cameraGrid = v.findViewById(R.id.cameraGrid);
+        spinner = (Spinner) v.findViewById(R.id.spanner);
+        spinner_cameraId = v.findViewById(R.id.spinner_cameraId);
+        spinner.setDropDownVerticalOffset(50);
+        spinner.setPopupBackgroundDrawable(new ColorDrawable(Color.parseColor("#AA000000")));
+        spinner_cameraId.setPopupBackgroundDrawable(new ColorDrawable(Color.parseColor("#AA000000")));
+
+    // 建立数据源
+        adapter = new OutPutAdapter(this.getActivity(),outputSizes);
+        /*adapter.setItemClickListener(new OutPutAdapter.MyItemClickListener() {
+            @Override
+            public void onclick(int position) {
+                spinner.setSelection(position);
+                spinner.getSelectedItem();
+                Log.e("click","item is clicked");
+                configureTransform(outputSizes.get(position).getWidth(),outputSizes.get(position).getHeight());
+            }
+        });*/
+        spinner.setAdapter(adapter);
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if(first_cameraResolution){
+                    first_cameraResolution=false;
+                }
+                else{
+                    int width = outputSizes.get(position).getWidth();
+                    int height = outputSizes.get(position).getHeight();
+                    Log.e("TAG","当前position "+position+"item is clicked "+width+"×"+height);
+                    screenSize = new Size(width,height);
+                    sizePosition = position;
+                    setUpCameraOutputs(mCameraId,screenSize,screenSize);
+                }
+
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+
+            }
+        });
+        setUpCameraList(); //初始化摄像头id列表
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this.getActivity(),R.layout.layout_cameraid,R.id.cameraid_item,cameraList);
+
+        spinner_cameraId.setAdapter(adapter);
+        spinner_cameraId.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if(first_cameraID){
+                    first_cameraID = false;
+                }
+                else{
+                    closeCamera();
+                    Log.e("TAG","选择CameraId");
+                    openCamera(cameraList.get(position));
+                }
+
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+
+            }
+        });
+
+        photo_view = v.findViewById(R.id.photo_view);
+        photo_view.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if(thumb_file!=null){
+                    if (thumb_file.exists()) {
+                        Uri uri = Uri.parse(thumb_file.getAbsolutePath().toString());
+                        Intent intent = new Intent();
+                        intent.setAction(Intent.ACTION_DEFAULT);
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        intent.setDataAndType(uri, "image/*");
+
+                        startActivity(intent);
+                    }else{
+                        Toast.makeText(Camera2RawFragment.this.getActivity(), "图片不存在", Toast.LENGTH_SHORT).show();
+                    }
+                }
+
+            }
+        });
+
+        return v;
     }
 
+    /*
+    获取所有raw摄像头
+     */
+    private void setUpCameraList(){
+        cameraList = new ArrayList<>();
+        // Find a CameraDevice that supports RAW captures, and configure state.
+        if(manager == null){
+            manager = (CameraManager) this.getActivity().getSystemService(Context.CAMERA_SERVICE);
+        }
+        try {
+            for (final String cameraId : manager.getCameraIdList()) {
+                Log.e("TAG", manager.getCameraIdList().length + "");
+                CameraCharacteristics characteristics
+                        = manager.getCameraCharacteristics(cameraId);
+
+                // We only use a camera that supports RAW in this sample.
+                /*if (!contains(characteristics.get(
+                        CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES),
+                        CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)) {
+                    continue;
+                }*/
+                cameraList.add(cameraId);
+            }
+        }
+        catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
     @Override
     public void onViewCreated(final View view, Bundle savedInstanceState) {
         view.findViewById(R.id.picture).setOnClickListener(this);
-        view.findViewById(R.id.info).setOnClickListener(this);
+        /*view.findViewById(R.id.info).setOnClickListener(this);*/
         mTextureView = (AutoFitTextureView) view.findViewById(R.id.texture);
 
         // Setup a new OrientationEventListener.  This is used to handle rotation events like a
@@ -628,11 +821,23 @@ public class Camera2RawFragment extends Fragment
 
     @Override
     public void onResume() {
+        Log.e("TAG","onResume 调用！");
         super.onResume();
         startBackgroundThread();
-        openCamera();
+        if(mCameraId == null){
+            openCamera();
+        }
+        else{
+
+            Log.e("TAG","width "+screenSize.getWidth()+" height"+screenSize.getHeight());
+            setUpCameraOutputs(mCameraId,screenSize,screenSize);
+            openCamera(mCameraId);
+
+        }
+
 
         // When the screen is turned off and turned back on, the SurfaceTexture is already
+        // available, and "onSurfaceTextureAvailable" will not be called. In that case, we should
         // available, and "onSurfaceTextureAvailable" will not be called. In that case, we should
         // configure the preview bounds here (otherwise, we wait until the surface is ready in
         // the SurfaceTextureListener).
@@ -644,6 +849,25 @@ public class Camera2RawFragment extends Fragment
         if (mOrientationListener != null && mOrientationListener.canDetectOrientation()) {
             mOrientationListener.enable();
         }
+    }
+
+    @Override
+    public void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putString("cameraId",mCameraId);
+        outState.putInt("sizePosition",sizePosition);
+        Log.e("TAG","保存数据");
+    }
+
+    @Override
+    public void onViewStateRestored(Bundle savedInstanceState) {
+        super.onViewStateRestored(savedInstanceState);
+        if(savedInstanceState!=null){
+            mCameraId = savedInstanceState.getString("cameraId","0");
+            sizePosition = savedInstanceState.getInt("sizePosition",0);
+            screenSize = outputSizes.get(sizePosition);
+        }
+        Log.e("TAG","恢复数据");
     }
 
     @Override
@@ -693,9 +917,197 @@ public class Camera2RawFragment extends Fragment
     /**
      * Sets up state related to camera that is needed before opening a {@link CameraDevice}.
      */
-    private boolean setUpCameraOutputs() {
+    @SuppressLint("MissingPermission")
+    private void  openCamera(String id){
+        Log.e("TAG","sizes:"+outputSizes);
+        if (!setUpCameraOutputs(id)) {
+            return;
+        }
+        if (!hasAllPermissionsGranted()) {
+            requestCameraPermissions();
+            return;
+        }
+        Log.e("TAG","sieze s sk dd ");
         Activity activity = getActivity();
-        CameraManager manager = (CameraManager) activity.getSystemService(Context.CAMERA_SERVICE);
+        manager = (CameraManager) activity.getSystemService(Context.CAMERA_SERVICE);
+        try {
+            // Wait for any previously running session to finish.
+            if (!mCameraOpenCloseLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) {
+                throw new RuntimeException("Time out waiting to lock camera opening.");
+            }
+
+            String cameraId;
+            Handler backgroundHandler;
+            synchronized (mCameraStateLock) {
+                cameraId = id;
+                backgroundHandler = mBackgroundHandler;
+            }
+
+            // Attempt to open the camera. mStateCallback will be called on the background handler's
+            // thread when this succeeds or fails.
+            manager.openCamera(cameraId, mStateCallback, backgroundHandler);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        } catch (InterruptedException e) {
+            throw new RuntimeException("Interrupted while trying to lock camera opening.", e);
+        }
+    }
+
+    /*
+    设置imageReader
+     */
+    private boolean setUpCameraOutputs(String id,Size jepgSize,Size rawSize) {
+        Activity activity = getActivity();
+        manager = (CameraManager) activity.getSystemService(Context.CAMERA_SERVICE);
+        if (manager == null) {
+            ErrorDialog.buildErrorDialog("This device doesn't support Camera2 API.").
+                    show(getFragmentManager(), "dialog");
+            return false;
+        }
+        CameraCharacteristics characteristics
+                = null;
+        try {
+            characteristics = manager.getCameraCharacteristics(id);
+        }
+        catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+
+        // We only use a camera that supports RAW in this sample.
+        if (!contains(characteristics.get(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES),
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)) {
+            return false;
+        }
+
+        StreamConfigurationMap map = characteristics.get(
+                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+
+        synchronized (mCameraStateLock) {
+            // Set up ImageReaders for JPEG and RAW outputs.  Place these in a reference
+            // counted wrapper to ensure they are only closed when all background tasks
+            // using them are finished.
+            Size largestRaw = Collections.max(
+                    Arrays.asList(map.getOutputSizes(ImageFormat.RAW_SENSOR)),
+                    new CompareSizesByArea());
+            mJpegImageReader = new RefCountedAutoCloseable<>(
+                    ImageReader.newInstance(jepgSize.getWidth(),
+                            jepgSize.getHeight(), ImageFormat.JPEG, /*maxImages*/5));
+            mRawImageReader = new RefCountedAutoCloseable<>(
+                    ImageReader.newInstance(largestRaw.getWidth(),
+                            largestRaw.getHeight(), ImageFormat.RAW_SENSOR, /*maxImages*/ 5));
+
+            mJpegImageReader.get().setOnImageAvailableListener(
+                    mOnJpegImageAvailableListener, mBackgroundHandler);
+            mRawImageReader.get().setOnImageAvailableListener(
+                    mOnRawImageAvailableListener, mBackgroundHandler);
+
+            mCharacteristics = characteristics;
+            mCameraId = id;
+            return true;
+        }
+    }
+
+    private boolean setUpCameraOutputs(String id) {
+        Activity activity = getActivity();
+        manager = (CameraManager) activity.getSystemService(Context.CAMERA_SERVICE);
+        if (manager == null) {
+            ErrorDialog.buildErrorDialog("This device doesn't support Camera2 API.").
+                    show(getFragmentManager(), "dialog");
+            return false;
+        }
+        CameraCharacteristics characteristics
+                = null;
+        try {
+            characteristics = manager.getCameraCharacteristics(id);
+        }
+        catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+
+        // We only use a camera that supports RAW in this sample.
+
+
+        StreamConfigurationMap map = characteristics.get(
+                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+
+        // For still image captures, we use the largest available size.
+        Size largestJpeg = Collections.max(
+                Arrays.asList(map.getOutputSizes(ImageFormat.JPEG)),
+                new CompareSizesByArea());
+        Size largestRaw;
+        for(int i = 0;i<map.getOutputFormats().length;i++){
+            Log.e("TAG","摄像头"+id+"支持的格式"+map.getOutputFormats()[i]);
+        }
+
+        if (!contains(characteristics.get(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES),
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)) {
+            largestRaw = new Size(1080 ,1920);
+        } else{
+            largestRaw = Collections.max(
+                    Arrays.asList(map.getOutputSizes(ImageFormat.RAW_SENSOR)),
+                    new CompareSizesByArea());
+        }
+
+        synchronized (mCameraStateLock) {
+            // Set up ImageReaders for JPEG and RAW outputs.  Place these in a reference
+            // counted wrapper to ensure they are only closed when all background tasks
+            // using them are finished.
+            if (mJpegImageReader == null || mJpegImageReader.getAndRetain() == null) {
+                mJpegImageReader = new RefCountedAutoCloseable<>(
+                        ImageReader.newInstance(largestJpeg.getWidth(),
+                                largestJpeg.getHeight(), ImageFormat.JPEG, /*maxImages*/2));
+            }
+            mJpegImageReader.get().setOnImageAvailableListener(
+                    mOnJpegImageAvailableListener, mBackgroundHandler);
+
+            if (mRawImageReader == null || mRawImageReader.getAndRetain() == null) {
+                mRawImageReader = new RefCountedAutoCloseable<>(
+                        ImageReader.newInstance(largestRaw.getWidth(),
+                                largestRaw.getHeight(), ImageFormat.RAW_SENSOR, /*maxImages*/ 2));
+            }
+            mRawImageReader.get().setOnImageAvailableListener(
+                    mOnRawImageAvailableListener, mBackgroundHandler);
+
+            mCharacteristics = characteristics;
+            mCameraId = id;
+            return true;
+        }
+    }
+    /*
+
+     */
+
+    /*
+    获取预览尺寸
+
+     */
+    public List<Size> getCameraOutputSizes(String cameraId, Class clz){
+        try {
+            CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
+            StreamConfigurationMap configs = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            return Arrays.asList(configs.getOutputSizes(clz));
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+
+        return null;
+    }
+    public List<Size> getCameraOutputSizes(String cameraId,int format){
+        try {
+            CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
+            StreamConfigurationMap configs = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            return Arrays.asList(configs.getOutputSizes(format));
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+
+        return null;
+    }
+    private boolean setUpCameraOutputs(){
+        Activity activity = getActivity();
+        manager = (CameraManager) activity.getSystemService(Context.CAMERA_SERVICE);
         if (manager == null) {
             ErrorDialog.buildErrorDialog("This device doesn't support Camera2 API.").
                     show(getFragmentManager(), "dialog");
@@ -703,17 +1115,20 @@ public class Camera2RawFragment extends Fragment
         }
         try {
             // Find a CameraDevice that supports RAW captures, and configure state.
-            for (String cameraId : manager.getCameraIdList()) {
+            for (final String cameraId : manager.getCameraIdList()) {
+                Log.e("TAG",manager.getCameraIdList().length+"");
                 CameraCharacteristics characteristics
                         = manager.getCameraCharacteristics(cameraId);
 
                 // We only use a camera that supports RAW in this sample.
-                if (!contains(characteristics.get(
+                /*if (!contains(characteristics.get(
                                 CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES),
                         CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)) {
                     continue;
+                }*/
+                if(characteristics.get(CameraCharacteristics.LENS_FACING)==CameraMetadata.LENS_FACING_FRONT){
+                    continue;
                 }
-
                 StreamConfigurationMap map = characteristics.get(
                         CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
 
@@ -725,6 +1140,7 @@ public class Camera2RawFragment extends Fragment
                 Size largestRaw = Collections.max(
                         Arrays.asList(map.getOutputSizes(ImageFormat.RAW_SENSOR)),
                         new CompareSizesByArea());
+                screenSize = largestJpeg;
 
                 synchronized (mCameraStateLock) {
                     // Set up ImageReaders for JPEG and RAW outputs.  Place these in a reference
@@ -748,9 +1164,12 @@ public class Camera2RawFragment extends Fragment
 
                     mCharacteristics = characteristics;
                     mCameraId = cameraId;
+                    return true;
                 }
-                return true;
+
+
             }
+
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
@@ -766,6 +1185,7 @@ public class Camera2RawFragment extends Fragment
      */
     @SuppressWarnings("MissingPermission")
     private void openCamera() {
+        /*outputSizes = getCameraOutputSizes(mCameraId,SurfaceTexture.class);*/
         if (!setUpCameraOutputs()) {
             return;
         }
@@ -775,7 +1195,7 @@ public class Camera2RawFragment extends Fragment
         }
 
         Activity activity = getActivity();
-        CameraManager manager = (CameraManager) activity.getSystemService(Context.CAMERA_SERVICE);
+        manager = (CameraManager) activity.getSystemService(Context.CAMERA_SERVICE);
         try {
             // Wait for any previously running session to finish.
             if (!mCameraOpenCloseLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) {
@@ -919,6 +1339,9 @@ public class Camera2RawFragment extends Fragment
      * <p/>
      * Call this only with {@link #mCameraStateLock} held.
      */
+    private void createCameraPreviewSessionLocked(int width,int height){
+
+    }
     private void createCameraPreviewSessionLocked() {
         try {
             SurfaceTexture texture = mTextureView.getSurfaceTexture();
@@ -933,10 +1356,21 @@ public class Camera2RawFragment extends Fragment
                     = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             mPreviewRequestBuilder.addTarget(surface);
 
+            Log.e("surface:",""+surface);
             // Here, we create a CameraCaptureSession for camera preview.
-            mCameraDevice.createCaptureSession(Arrays.asList(surface,
-                            mJpegImageReader.get().getSurface(),
-                            mRawImageReader.get().getSurface()), new CameraCaptureSession.StateCallback() {
+            List<Surface> outList;
+
+            /*if (!contains(mCharacteristics.get(
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES),
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)) {
+                outList = Arrays.asList(surface,mJpegImageReader.get().getSurface());
+            }
+            else{*/
+                outList = Arrays.asList(surface,mJpegImageReader.get().getSurface());
+           /* }*/
+
+            mCameraDevice.createCaptureSession(outList,
+                      new CameraCaptureSession.StateCallback() {
                         @Override
                         public void onConfigured(CameraCaptureSession cameraCaptureSession) {
                             synchronized (mCameraStateLock) {
@@ -1042,7 +1476,6 @@ public class Camera2RawFragment extends Fragment
             if (null == mTextureView || null == activity) {
                 return;
             }
-
             StreamConfigurationMap map = mCharacteristics.get(
                     CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
 
@@ -1083,10 +1516,14 @@ public class Camera2RawFragment extends Fragment
             }
 
             // Find the best preview size for these view dimensions and configured JPEG size.
-            Size previewSize = chooseOptimalSize(map.getOutputSizes(SurfaceTexture.class),
+            previewSize = chooseOptimalSize(map.getOutputSizes(SurfaceTexture.class),
                     rotatedViewWidth, rotatedViewHeight, maxPreviewWidth, maxPreviewHeight,
                     largestJpeg);
-
+            /*Size previewSize = chooseOptimalSize(map.getOutputSizes(SurfaceTexture.class),
+                    1080, 1920, maxPreviewWidth, maxPreviewHeight,
+                    largestJpeg);*/
+            previewSize = new Size(screenSize.getWidth(),screenSize.getHeight());
+           /* previewSize = new Size(1920,1080);*/
             if (swappedDimensions) {
                 mTextureView.setAspectRatio(
                         previewSize.getHeight(), previewSize.getWidth());
@@ -1101,7 +1538,7 @@ public class Camera2RawFragment extends Fragment
                     CameraCharacteristics.LENS_FACING_FRONT) ?
                     (360 + ORIENTATIONS.get(deviceRotation)) % 360 :
                     (360 - ORIENTATIONS.get(deviceRotation)) % 360;
-
+            //Log.e("TAG","设备方向:"+deviceRotation+"旋转角度:"+rotation);
             Matrix matrix = new Matrix();
             RectF viewRect = new RectF(0, 0, viewWidth, viewHeight);
             RectF bufferRect = new RectF(0, 0, previewSize.getHeight(), previewSize.getWidth());
@@ -1215,7 +1652,13 @@ public class Camera2RawFragment extends Fragment
                     mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
 
             captureBuilder.addTarget(mJpegImageReader.get().getSurface());
-            captureBuilder.addTarget(mRawImageReader.get().getSurface());
+            // if support raw, add the target
+            if (contains(mCharacteristics.get(
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES),
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)) {
+                captureBuilder.addTarget(mRawImageReader.get().getSurface());
+            }
+
 
             // Use the same AE and AF modes as the preview.
             setup3AControlsLocked(captureBuilder);
@@ -1234,11 +1677,15 @@ public class Camera2RawFragment extends Fragment
             // of active requests.
             ImageSaver.ImageSaverBuilder jpegBuilder = new ImageSaver.ImageSaverBuilder(activity)
                     .setCharacteristics(mCharacteristics);
-            ImageSaver.ImageSaverBuilder rawBuilder = new ImageSaver.ImageSaverBuilder(activity)
-                    .setCharacteristics(mCharacteristics);
-
             mJpegResultQueue.put((int) request.getTag(), jpegBuilder);
-            mRawResultQueue.put((int) request.getTag(), rawBuilder);
+            //if support raw,save the raw image;
+            if (contains(mCharacteristics.get(
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES),
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)) {
+                ImageSaver.ImageSaverBuilder rawBuilder = new ImageSaver.ImageSaverBuilder(activity)
+                        .setCharacteristics(mCharacteristics);
+                mRawResultQueue.put((int) request.getTag(), rawBuilder);
+            }
 
             mCaptureSession.capture(request, mCaptureCallback, mBackgroundHandler);
 
@@ -1358,6 +1805,7 @@ public class Camera2RawFragment extends Fragment
                            RefCountedAutoCloseable<ImageReader> reader) {
             mImage = image;
             mFile = file;
+
             mCaptureResult = result;
             mCharacteristics = characteristics;
             mContext = context;
@@ -1376,8 +1824,14 @@ public class Camera2RawFragment extends Fragment
                     FileOutputStream output = null;
                     try {
                         output = new FileOutputStream(mFile);
+                        thumb_file = mFile;
                         output.write(bytes);
                         success = true;
+                        BitmapFactory.Options opt = new BitmapFactory.Options();
+                        opt.inSampleSize = 6;
+                        Log.e("TAG","缩略图片地址"+mFile.getCanonicalPath().toString());
+                        thumb_bitmap = BitmapFactory.decodeFile(mFile.getCanonicalPath().toString(),opt);
+                        dataHandler.sendEmptyMessage(MESSAGE_IMAGE_SAVED);
                     } catch (IOException e) {
                         e.printStackTrace();
                     } finally {

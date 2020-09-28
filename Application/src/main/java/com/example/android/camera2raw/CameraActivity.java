@@ -19,6 +19,8 @@ package com.example.android.camera2raw;
 import android.app.Activity;
 import android.os.Bundle;
 
+import com.example.android.camera2raw.fragment.Camera2RawFragment;
+
 /**
  * Activity displaying a fragment that implements RAW photo captures.
  */
