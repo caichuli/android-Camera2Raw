@@ -1043,7 +1043,9 @@ public class Camera2RawFragment extends Fragment
         if (!contains(characteristics.get(
                 CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES),
                 CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)) {
-            largestRaw = new Size(1080 ,1920);
+            largestRaw = Collections.max(
+                    Arrays.asList(map.getOutputSizes(ImageFormat.JPEG)),
+                    new CompareSizesByArea());
         } else{
             largestRaw = Collections.max(
                     Arrays.asList(map.getOutputSizes(ImageFormat.RAW_SENSOR)),
@@ -1366,7 +1368,7 @@ public class Camera2RawFragment extends Fragment
                 outList = Arrays.asList(surface,mJpegImageReader.get().getSurface());
             }
             else{*/
-                outList = Arrays.asList(surface,mJpegImageReader.get().getSurface());
+                outList = Arrays.asList(surface,mJpegImageReader.get().getSurface(),mRawImageReader.get().getSurface());
            /* }*/
 
             mCameraDevice.createCaptureSession(outList,
@@ -1523,6 +1525,7 @@ public class Camera2RawFragment extends Fragment
                     1080, 1920, maxPreviewWidth, maxPreviewHeight,
                     largestJpeg);*/
             previewSize = new Size(screenSize.getWidth(),screenSize.getHeight());
+            //Log.e("TAG","preSize+"+previewSize.toString());
            /* previewSize = new Size(1920,1080);*/
             if (swappedDimensions) {
                 mTextureView.setAspectRatio(

@@ -1,0 +1,4 @@
+#Sun Sep 27 17:54:23 CST 2020
+base.0=/home/tssh/code/android-Camera2Raw/Application/build/intermediates/transforms/dex/release/0
+path.0=classes.dex
+renamed.0=classes.dex
